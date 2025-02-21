@@ -46,26 +46,26 @@ local function hashType(sample : any) : string
 	if not sample then return "__null" end
 	local t = typeof(sample)
 	if t == "number" then
-		return "n"..tostring(sample)
+		return "n/"..tostring(sample)
 	elseif t == "string" then
-		return "s"..tostring(sample)
+		return "s/"..tostring(sample)
 	elseif t == "boolean" then
-		return "b"..tostring(sample)
+		return "b/"..tostring(sample)
 	elseif t == "Vector3" then
 		local x = sample.X
 		local y = sample.Y
 		local z = sample.Z
-		return "vec"..tostring(x + y + z)
+		return "vec/"..tostring(x + y + z)
 	elseif t == "CFrame" then
 		local x = sample.X
 		local y = sample.Y
 		local z = sample.Z
-		return "cf"..tostring(x + y + z)
+		return "cf/"..tostring(x + y + z)
 	elseif t == "Color3" then
 		local r = sample.R
 		local g = sample.G
 		local b = sample.B
-		return "co"..tostring(r + g + b)
+		return "co/"..tostring(r + g + b)
 	else
 		warn(`Sample type not supported assigning null type, sample={sample}`)
 		return "__null"
@@ -128,10 +128,11 @@ export type bufferDecode<T> = (bufferObject : bufferObject<T>, buff : buffer) ->
 -- An object that holds all the details needed to write a given datatype/datatype(s) into buffer or read a datatype/datatype-pack from a buffer
 export type bufferObject<T> = {
 	_sample : T,
-	_staticMeta : {[any] : staticDataType<any>} | staticDataType<any> | nil,
-	_dynamicMeta : {[any] : dynamicDataType<any>} | dynamicDataType<any> | nil,
-	_bufferType : bufferType,
+	_staticMeta : {staticDataType<any>} | staticDataType<any> | nil,
+	_dynamicMeta : {dynamicDataType<any>} | dynamicDataType<any> | nil,
 	_staticSize : number,
+	_statickeys : {string},
+	_dynamicKeys : {string},
 	encode : bufferEncode<T>,
 	decode : bufferDecode<T>,
 }
@@ -149,53 +150,61 @@ end
 local function ds_Write<T>(bufferObject : bufferObject<T>, valueToWrite : T) : buffer
 	local dataType = bufferObject._dynamicMeta :: dynamicDataType<any>
 	local size = dataType.findSize(valueToWrite)
-	local buff = buffer.create(size + 2)
-	buffer.writeu16(buff, 0, size)
-	dataType.bufferWrite(buff, 2, valueToWrite, size)
+	local buff = buffer.create(size + 4)
+	buffer.writeu32(buff, 0, size)
+	dataType.bufferWrite(buff, 4, valueToWrite, size)
 	return buff
 end
 
 -- A method to write the given data into STATIC-TABLE bufferObject
 local function st_Write<T>(bufferObject : bufferObject<T>, valueToWrite : T) : buffer
-	local buff = buffer.create(bufferObject._staticSize)
+	local buff = buffer.create(bufferObject._staticSize )
 	
 	local currentIndex = 0
-	
-	for key, dataType in bufferObject._staticMeta :: {[any] : staticDataType<any>} do
-		local size = dataType.size
-		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], size)
-		currentIndex += size
+	local staticMeta = bufferObject._staticMeta :: {staticDataType<any>}
+	local keys = bufferObject._statickeys
+
+	--// Static write	
+	for i = 1, #staticMeta do
+		local dataType = staticMeta[i]
+		local key = keys[i]
+		local fieldSize = dataType.size
+		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], fieldSize)
+		currentIndex += fieldSize
 	end
-	
+
 	return buff
 end
 
 -- A method to write the given data into DYNAMIC-TABLE bufferObject
 local function dt_Write<T>(bufferObject : bufferObject<T>, valueToWrite : T) : buffer
 
-	local dynamicMeta = bufferObject._dynamicMeta
+	local dynamicMeta = bufferObject._dynamicMeta :: {dynamicDataType<any>}
 	local dynamicSizes = {}
 	local size = 0
+	local keys = bufferObject._dynamicKeys
 
 	-- Dynamic size
-	for key, dataType in dynamicMeta :: {[any] : dynamicDataType<any>} do
+	for i = 1, #dynamicMeta do
+		local dataType = dynamicMeta[i]
+		local key = keys[i]
 		local dynamicSize = dataType.findSize((valueToWrite :: any)[key])
-		table.insert(dynamicSizes, dynamicSize)
-		size += dynamicSize + 2
+		dynamicSizes[i] = dynamicSize
+		size += dynamicSize + 4
 	end
 
 	local buff = buffer.create(size)
 	local currentIndex = 0
-	local i = 0
 
 	-- Dynamic write
-	for key, dataType in dynamicMeta :: {[any] : dynamicDataType<any>} do
-		i += 1
-		local dynamicSize = dynamicSizes[i]
-		buffer.writeu16(buff, currentIndex, dynamicSize)
-		currentIndex += 2
-		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], dynamicSize)
-		currentIndex += dynamicSize
+	for i = 1, #dynamicMeta do
+		local dataType = dynamicMeta[i]
+		local key = keys[i]
+		local fieldSize = dynamicSizes[i]
+		buffer.writeu32(buff, currentIndex, fieldSize)
+		currentIndex += 4
+		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], fieldSize)
+		currentIndex += fieldSize
 	end
 	
 	return buff
@@ -204,39 +213,44 @@ end
 -- A method to write the given data into COMBINED bufferObject
 local function c_Write<T>(bufferObject : bufferObject<T>, valueToWrite : T) : buffer
 
-	local dynamicMeta = bufferObject._dynamicMeta
-	local staticMeta = bufferObject._staticMeta
+	local dynamicMeta = bufferObject._dynamicMeta :: {dynamicDataType<any>}
+	local staticMeta = bufferObject._staticMeta :: {staticDataType<any>}
 	local currentIndex = 0
 
 	local dynamicSizes = {}
 	local size = bufferObject._staticSize
+	local dkeys = bufferObject._dynamicKeys
+	local skeys = bufferObject._statickeys
 	
 	-- Dynamic size
-	for key, dataType in dynamicMeta :: {[any] : dynamicDataType<any>} do
+	for i = 1, #dynamicMeta do
+		local dataType = dynamicMeta[i]
+		local key = dkeys[i]
 		local dynamicSize = dataType.findSize((valueToWrite :: any)[key])
-		table.insert(dynamicSizes, dynamicSize)
-		size += dynamicSize + 2
+		dynamicSizes[i] = dynamicSize
+		size += dynamicSize + 4
 	end
 
 	local buff = buffer.create(size)
-	--// Static write
-	
-	for key, dataType in staticMeta :: {[any] : staticDataType<any>} do
-		size = dataType.size
-		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], size)
-		currentIndex += size
-	end
-	
-	local i = 0
 
-	--// Dynamic write
-	for key, dataType in dynamicMeta :: {[any] : dynamicDataType<any>} do
-		i += 1
-		local dynamicSize = dynamicSizes[i]
-		buffer.writeu16(buff, currentIndex, dynamicSize)
-		currentIndex += 2
-		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], dynamicSize)
-		currentIndex += dynamicSize
+	--// Static write	
+	for i = 1, #staticMeta do
+		local dataType = staticMeta[i]
+		local key = skeys[i]
+		local fieldSize = dataType.size
+		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], fieldSize)
+		currentIndex += fieldSize
+	end
+
+	-- Dynamic write
+	for i = 1, #dynamicMeta do
+		local dataType = dynamicMeta[i]
+		local key = dkeys[i]
+		local fieldSize = dynamicSizes[i]
+		buffer.writeu32(buff, currentIndex, fieldSize)
+		currentIndex += 4
+		dataType.bufferWrite(buff, currentIndex, (valueToWrite :: any)[key], fieldSize)
+		currentIndex += fieldSize
 	end
 	
 	return buff
@@ -251,18 +265,24 @@ end
 
 -- A method to read the given buffer using DYNAMIC-SINGLE bufferObject
 local function ds_Read<T>(bufferObject : bufferObject<T>, buff : buffer) : T
-	return (bufferObject._dynamicMeta :: dynamicDataType<any>).bufferRead(buff, 2, buffer.readu16(buff, 0))
+	return (bufferObject._dynamicMeta :: dynamicDataType<any>).bufferRead(buff, 4, buffer.readu32(buff, 0))
 end
 
 -- A method to read the given buffer using STATIC-TABLE bufferObject
 local function st_Read<T>(bufferObject : bufferObject<T>, buff : buffer) : T
 	local currentIndex = 0
 	local decoded : T = {} :: any
-	for key, dataType in bufferObject._staticMeta :: {[any] : staticDataType<any>} do
+	local staticMeta = bufferObject._staticMeta :: {staticDataType<T>}
+	local staticKeys = bufferObject._statickeys
+	
+	for i = 1, #staticMeta do
+		local dataType = staticMeta[i]
+		local key = staticKeys[i]
 		local size = dataType.size
 		;(decoded :: any)[key] = dataType.bufferRead(buff, currentIndex, size)
 		currentIndex += size				
 	end
+
 	return decoded :: T
 end
 
@@ -270,12 +290,19 @@ end
 local function dt_Read<T>(bufferObject : bufferObject<T>, buff : buffer) : T
 	local currentIndex = 0
 	local decoded : T = {} :: any
-	for key, dataType in bufferObject._dynamicMeta :: {[any] : dynamicDataType<any>} do
-		local size = buffer.readu16(buff, currentIndex)
-		currentIndex += 2
-		;(decoded :: any)[key] = dataType.bufferRead(buff, currentIndex, size)
+
+	local dynamicMeta = bufferObject._dynamicMeta :: {dynamicDataType<T>}
+	local dynamicKeys = bufferObject._dynamicKeys
+
+	for i = 1, #dynamicMeta do
+		local dataType = dynamicMeta[i]
+		local key = dynamicKeys[i]
+		local size = buffer.readu32(buff, currentIndex)
+		currentIndex += 4
+		(decoded :: any)[key] = dataType.bufferRead(buff, currentIndex, size)
 		currentIndex += size				
 	end
+
 	return decoded
 end
 
@@ -284,15 +311,24 @@ local function c_Read<T>(bufferObject : bufferObject<T>, buff : buffer) : T
 	local currentIndex = 0
 	local decoded : T = {} :: any
 	
-	for key, dataType in bufferObject._staticMeta :: {[any] : staticDataType<any>} do
+	local staticMeta = bufferObject._staticMeta :: {staticDataType<T>}
+	local staticKeys = bufferObject._statickeys
+	local dynamicMeta = bufferObject._dynamicMeta :: {dynamicDataType<T>}
+	local dynamicKeys = bufferObject._dynamicKeys
+	
+	for i = 1, #staticMeta do
+		local dataType = staticMeta[i]
+		local key = staticKeys[i]
 		local size = dataType.size
 		;(decoded :: any)[key] = dataType.bufferRead(buff, currentIndex, size)
 		currentIndex += size				
 	end
 	
-	for key, dataType in bufferObject._dynamicMeta :: {[any] : dynamicDataType<any>} do
-		local size = buffer.readu16(buff, currentIndex)
-		currentIndex += 2
+	for i = 1, #dynamicMeta do
+		local dataType = dynamicMeta[i]
+		local key = dynamicKeys[i]
+		local size = buffer.readu32(buff, currentIndex)
+		currentIndex += 4
 		;(decoded :: any)[key] = dataType.bufferRead(buff, currentIndex, size)
 		currentIndex += size				
 	end
@@ -321,48 +357,57 @@ local typeToRead = {
 local function buildMeta<T, Y>(bufferObject : bufferObject<T>)
 	
 	local sample = bufferObject._sample
-	local staticMeta = bufferObject._staticMeta
-	local dynamicMeta = bufferObject._dynamicMeta
-	local bufferType : bufferType = bufferObject._bufferType
+	local staticMeta
+	local dynamicMeta
+	local bufferType : bufferType = "STATIC-SINGLE"
 	
 	if typeof(sample) == "table" then
 		
 		-- If a table then iterate through each element and create static and/or dynamic table-meta
 		local staticSize = 0
+		local staticCount = 0
 		local dynamicCount = 0
+
 		staticMeta = {}
 		dynamicMeta = {}
-		
-		for key, dataSample : Y in sample do
-			local hash = hashType(dataSample)
-			
-			local dataType : staticDataType<Y> | dynamicDataType<Y> = staticTypeCache[hash]
-			if dataType then 
-				(staticMeta :: {[any] : staticDataType<Y>})[key] = dataType :: staticDataType<Y>
-				staticSize += (dataType :: staticDataType<Y>).size
-				continue
-			end
-			
-			dataType = dynamicTypeCache[hash]
-			assert(dataType, `Could not find a valid datatype for the given sample, sample={sample}, key={key}`)
-			dynamicCount += 1
-			
-			(dynamicMeta :: {[any] : dynamicDataType<Y>})[key] = dataType :: dynamicDataType<Y> 
+
+		local keys = {}
+		local hashes = {}
+		local dynamicKeys = {}
+		local staticKeys = {}
+
+		for k, v in sample do
+			table.insert(keys, k)
+			hashes[k] = hashType(v)
 		end
+
+		table.sort(keys)
 		
-		-- Assign bufferType based on static-size and dynamic-count
-		bufferType = (dynamicCount == 0 and "STATIC-TABLE") or (staticSize == 0 and "DYNAMIC-TABLE") or "COMPLEX"
+		for i = 1, #keys do
+			local key = keys[i]
+			local hash = hashes[key]
+			local dataType : staticDataType<Y> | dynamicDataType<Y> = staticTypeCache[hash]
+			if dataType then
+				staticCount += 1
+				staticSize += (dataType ::  staticDataType<Y>).size
+				staticKeys[staticCount] = key
+				;(staticMeta :: {staticDataType<Y>})[staticCount] = dataType :: any
+			else
+				dataType = dynamicTypeCache[hash]
+				assert(dataType, `Could not find a valid datatype for the given sample, sample={sample[key]}, key={key}`)
+				dynamicCount += 1
+				dynamicKeys[dynamicCount] = key
+				;(dynamicMeta :: {dynamicDataType<Y>})[dynamicCount] = dataType :: any
+			end			
+		end
+
 		bufferObject._staticSize = staticSize
-		
-		-- If static then set dynamic-meta to nil else-if dynamic then set static meta to nil
-		if bufferType == "STATIC-TABLE" then 
-            dynamicMeta = nil 
-        elseif bufferType == "DYNAMIC-TABLE" then 
-            staticMeta = nil 
-        end
-		
+		bufferObject._staticMeta = staticCount ~= 0 and staticMeta or nil
+		bufferObject._dynamicMeta = dynamicCount ~= 0 and dynamicMeta or nil	
+		bufferObject._statickeys = staticKeys
+		bufferObject._dynamicKeys = dynamicKeys
+
 	else
-		
 		-- If not a table then create single static or dynamic meta
 		local hash = hashType(sample)
 		
@@ -376,8 +421,9 @@ local function buildMeta<T, Y>(bufferObject : bufferObject<T>)
 			dynamicMeta = dataType :: dynamicDataType<Y>
 		end
 		
-		bufferType = (not dynamicMeta and "STATIC-SINGLE") or (not staticMeta and "DYNAMIC-SINGLE") or "COMPLEX"
 	end
+
+	bufferType = (not dynamicMeta and "STATIC-SINGLE") or (not staticMeta and "DYNAMIC-SINGLE") or "COMPLEX"
 	
 	bufferObject._staticMeta = staticMeta
 	bufferObject._dynamicMeta = dynamicMeta
@@ -387,19 +433,18 @@ end
 
 -- Creates a bufferObject of the type of the sample-provided
 local function createBufferObject<T>(sample : T)	
-	
 	local bufferObject : bufferObject<T>
 	
 	bufferObject = {
 		_sample = sample,
-		_bufferType = "STATIC-SINGLE",
 		_staticSize = 0,
 		encode = ss_Write,
 		decode = ss_Read,
+	 	_statickeys = {},
+		_dynamicKeys = {}
 	}
 	
 	buildMeta(bufferObject)
-	
 	return bufferObject
 end
 

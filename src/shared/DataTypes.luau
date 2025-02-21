@@ -62,14 +62,20 @@ local function writeColor3(buff : buffer, startIndex : number, valueToWrite : Co
 	writeu8(buff, startIndex + 2, valueToWrite.B * 255)
 end
 
-local function readColor3(buff : buffer, startIndex, _size : number) : Color3
+local function readColor3(buff : buffer, startIndex : number, _size : number) : Color3
 	return Color3.fromRGB(readu8(buff, startIndex), readu8(buff, startIndex + 1), readu8(buff, startIndex + 2))
 end
 
 local BufferModule = require(game.ReplicatedStorage.Shared.Buffer)
 
+local function createStaticString(sample : string) : string
+	return BufferModule.sType(sample, #sample, buffer.writestring, buffer.readstring)
+end
+
 return table.freeze({
 	string = BufferModule.dType("", string.len, buffer.writestring, buffer.readstring),
+
+	staticString = createStaticString,
 	
 	double = BufferModule.sType(640, 8, buffer.writef64, buffer.readf64),
 	float = BufferModule.sType(320, 4, buffer.writef32, buffer.readf32),
