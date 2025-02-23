@@ -2,45 +2,30 @@
 -- !native
 -- !optimize 2
 
-local DataStore = require(game.ServerScriptService.Server.DataStore)
-local DataTypes = require(game.ReplicatedStorage.Shared.DataTypes)
-local Players = game:GetService("Players")
-local defaultPlayerData = {
-    z = "zebra",
-    tokens = 0,
-    coins = 1000,
-    gems = 0,
-    nick = "null",
-    a = "hello",
-}
+-- local DataStore = require(game.ServerScriptService.Server.DataStore)
+-- local DataTypes = require(game.ReplicatedStorage.Shared.DataTypes)
 
-local playerData = DataStore.group("Player-Data-10", defaultPlayerData, {
-    coins = DataTypes.unsigned_long,
-    gems = DataTypes.unsigned_long,
-    tokens = DataTypes.unsigned_long,
-    nick = DataTypes.string,
-    z = DataTypes.string,
-    a = DataTypes.string,
-})
+-- local schema = buffer.create(4)
+-- local totalAppends = 660000
+-- local batchSize = 5000
 
-Players.PlayerAdded:Connect(function(player)
+-- for i = 1, totalAppends, batchSize do
+--     local batchEnd = math.min(i + batchSize - 1, totalAppends)
+--     for j = i, batchEnd do
+--         schema = DataStore.append(schema, {
+--             index = 9,
+--             size = 200,
+--             action = 2,
+--         })
+--     end
+--     print("Processed batch from", i, "to", batchEnd)
+--     task.wait()
+-- end
 
-    local container = playerData:container(player.UserId)
-    container.data.coins += 50
-    print(container)
-end)
+-- print("Final schema length:", buffer.len(schema))
 
-Players.PlayerRemoving:Connect(function(player)
+-- local st = os.clock()
+-- DataStore.build(schema)
+-- print("Build done in:", os.clock() - st)
 
-    playerData:dump(player.UserId)
-
-end)
-
-
-game:BindToClose(function()
-
-    task.wait(2)
-
-end)
-
-return 0
+-- return 0

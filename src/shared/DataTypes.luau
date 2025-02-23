@@ -94,5 +94,6 @@ return table.freeze({
 	vector3 = BufferModule.sType(Vector3.new(), 12, writevec3, readvec3),
 	cframe = BufferModule.sType(CFrame.new(), 48, writeCFrame, readCFrame),
 	color3 = BufferModule.sType(Color3.new(), 3, writeColor3, readColor3),
+
 })
 	

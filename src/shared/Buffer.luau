@@ -66,6 +66,10 @@ local function hashType(sample : any) : string
 		local g = sample.G
 		local b = sample.B
 		return "co/"..tostring(r + g + b)
+	elseif t == "function" then
+		return "f/"..tostring(sample)
+	elseif t == "table" then
+		return "t/"..tostring(sample)
 	else
 		warn(`Sample type not supported assigning null type, sample={sample}`)
 		return "__null"
@@ -133,6 +137,7 @@ export type bufferObject<T> = {
 	_staticSize : number,
 	_statickeys : {string},
 	_dynamicKeys : {string},
+	_sortedKeys : {string},
 	encode : bufferEncode<T>,
 	decode : bufferDecode<T>,
 }
@@ -406,6 +411,7 @@ local function buildMeta<T, Y>(bufferObject : bufferObject<T>)
 		bufferObject._dynamicMeta = dynamicCount ~= 0 and dynamicMeta or nil	
 		bufferObject._statickeys = staticKeys
 		bufferObject._dynamicKeys = dynamicKeys
+		bufferObject._sortedKeys = keys
 
 	else
 		-- If not a table then create single static or dynamic meta
@@ -441,7 +447,8 @@ local function createBufferObject<T>(sample : T)
 		encode = ss_Write,
 		decode = ss_Read,
 	 	_statickeys = {},
-		_dynamicKeys = {}
+		_dynamicKeys = {},
+		_sortedKeys = {},
 	}
 	
 	buildMeta(bufferObject)

@@ -9,221 +9,207 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage").Shared
 local BufferModule = require(ReplicatedStorage.Buffer)
 local DataTypes = require(ReplicatedStorage.DataTypes)
 
-export type metaData = {
-    sessionId : string,
+local schemaStore = DataStoreService:GetDataStore("___Schema_Store___")
+
+export type key = string
+export type keySet = {key}
+
+export type change = {
+    index : number,
+    key : key,
+    action : number,
+    size : number,
+}
+
+export type changeLog = {change}
+
+export type schema = {
+    baseKeys : keySet,
+    currentKeys : keySet,
+    changeLog : changeLog,
     version : number,
-    size : number
 }
 
-export type container<T> = {
-    data : T,
-    meta : metaData,
-    id : string,
+export type data<T> = {
+    sample : T,
+    bufferObj : BufferModule.bufferObject<T>,
+    schema : schema,
 }
 
-export type LOAD_STATUS = "SUCCESS" | "ANOTHER_ACTIVE_SESSION" | "ALREADY_OPEN" | "DATASTORE_FAILED" | "UNKNOWN"
-export type SAVE_STATUS = "SUCCESS" | "SESSION_NO_MATCH" | "OUTDATED_VERSION" | "NO_PREV_DATA" | "DATASTORE_FAILED" | "UNKNOWN"
+local HEADER_SIZE = 1 + 2
 
-export type dataGroup<T> = {
-    _sample : T,
-    _buffer : BufferModule.bufferObject<T>,
-    _dataStore : DataStore,
-    _containers : {[string] : container<T>},
-    defaultData : T,
-    name : string,
-    container : (dataGroup : dataGroup<T>, id : string | number) -> container<T>,
-    dump : (dataGroup : dataGroup<T>, id : string | number) -> (),
-}
+local writeu8 = buffer.writeu8
+local readu8  = buffer.readu8
+local writeString = buffer.writestring
+local readString = buffer.readstring
 
-local RELEASED_SESSION = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+local function findSizeOfKeySet(sample : keySet) : number
+    local size = #sample
+    for _, key in sample do
+        size += #key
+    end
+    return size
+end
 
-local metaBuffer = BufferModule.buff({
-    sessionId = DataTypes.staticString("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"),
-    version = DataTypes.unsigned_long,
+local function readKeySet(buff : buffer, startIndex : number, size : number) : keySet
+    
+    local typeRegion = startIndex + size
+    local keySet = {}
+
+    while startIndex < typeRegion do
+        local size = readu8(buff, startIndex)
+        startIndex += 1
+        table.insert(keySet, readString(buff, startIndex, size))
+        startIndex += size
+    end
+
+    return keySet
+end
+
+local function writeKeySet(buff : buffer, startIndex : number, valueToWrite : keySet, size : number)
+    
+    for _, key in valueToWrite do        
+        local keySize = #key
+        writeu8(buff, startIndex, keySize)
+        startIndex += 1
+        writeString(buff, startIndex, key, size)
+        startIndex += keySize
+    end
+end
+
+local typeKeySet = BufferModule.dType({} :: keySet, findSizeOfKeySet, writeKeySet, readKeySet)
+
+local headerBufferObject = BufferModule.buff(
+    {
+        nextPage = DataTypes.boolean,
+        latestVersion = DataTypes.unsigned_int,
+        baseKeys = typeKeySet,
+    }
+)
+
+local changeBufferObject = BufferModule.buff({
+    key = DataTypes.string,
+    index = DataTypes.unsigned_int,
     size = DataTypes.unsigned_long,
-} :: metaData)
+    action = DataTypes.unsigned_short
+} :: change)
 
-local metaSize = metaBuffer._staticSize
+-- Handles loading for schema from database
+local function getSchemaFile(id : string) : buffer?
+    local success, result = pcall(function()
+        return schemaStore:GetAsync(id)
+    end)
 
-local function pack(metaData : metaData, data : buffer) : buffer
-    local dataSize = buffer.len(data)
-    metaData.size = dataSize
-    local meta = metaBuffer:encode(metaData)
-    local package = buffer.create(metaSize + dataSize)
-    buffer.copy(package, 0, meta)
-    buffer.copy(package, metaSize, data)
-    return package
+    if not success then
+        warn(result)
+        error("Schema loading failed, roblox data store failed, id="..id)
+    end
+
+    return result
 end
 
-local function unpack(package) : (metaData, buffer)
-   local meta = buffer.fromstring(buffer.readstring(package, 0, metaSize))
-   local metaData = metaBuffer:decode(meta)
-   
-   local data = buffer.fromstring(buffer.readstring(package, metaSize, metaData.size))
-   return metaData, data
+-- Handles saving schema file to data base
+local function setSchemaFile(id : string, schemaFile : buffer)
+    local success, result = pcall(function()
+        return schemaStore:SetAsync(id, schemaFile)
+    end)
+
+    if not success then
+        warn(result)
+        error("Schema saving failed, roblox data store failed, id="..id)
+    end
 end
 
-local function fetch<T>(group : dataGroup<T>, container : container<T>) : LOAD_STATUS
+-- Appends a give list of changes to a schema file
+local function appendChanges(changes : changeLog, schemaFile : buffer) : buffer
+
+    local sizeOfSchema = buffer.len(schemaFile)
     
-    local activeMetaData = container.meta
-    local status : LOAD_STATUS = "UNKNOWN"
-
-    local success, err = pcall(function()
-        return group._dataStore:UpdateAsync(container.id, function(oldPackage)
-            
-            if not oldPackage then
-                status = "SUCCESS"
-                return pack(activeMetaData, group._buffer:encode(container.data))
-            end
-
-            local metaData, data = unpack(oldPackage)
-
-            if metaData.sessionId ~= RELEASED_SESSION then
-                if metaData.sessionId == activeMetaData.sessionId then
-                    status = "ALREADY_OPEN"
-                else
-                    status = "ANOTHER_ACTIVE_SESSION"
-                end              
-                return oldPackage
-            end            
-
-            local decoded = group._buffer:decode(data)
-
-            container.data = decoded
-            activeMetaData.version = metaData.version
-            activeMetaData.size = metaData.size
+    for _, change in changes do
         
-            status = "SUCCESS"
-            return pack(activeMetaData, data)
-        end)
-    end)
+        local buff = changeBufferObject:encode(change)
+        local size = buffer.len(buff)
 
-    if not success then
-        status = "DATASTORE_FAILED"
-        warn("[DATASTORE][ERROR]", err)
+        local newBuffSize = sizeOfSchema + size
+        local newBuff = buffer.create(newBuffSize)
+        buffer.copy(newBuff, 0, schemaFile, 0, sizeOfSchema)
+        buffer.copy(newBuff, sizeOfSchema, buff, 0, size)
+        
+        sizeOfSchema = newBuffSize
     end
 
-    return status
+    return schemaFile
 end
 
-local function save<T>(group : dataGroup<T>, container : container<T>, shouldRelease : boolean?) : SAVE_STATUS
+-- Compares to sets of keys to find the changes and where those changes were made
+local function compareKeys(setOne : keySet, setTwo : keySet) : changeLog
     
-    local activeMetaData = container.meta
-    local status : SAVE_STATUS = "UNKNOWN"
-
-    local success, err = pcall(function()
-        return group._dataStore:UpdateAsync(container.id, function(oldPackage)
-            
-            if not oldPackage then
-                status = "NO_PREV_DATA"
-                return oldPackage
-            end
-
-            local metaData, _data = unpack(oldPackage)
-
-            if metaData.sessionId ~= activeMetaData.sessionId then
-                status = "SESSION_NO_MATCH"
-                return oldPackage
-            end
-
-            if metaData.version > activeMetaData.version then
-                status = "OUTDATED_VERSION"
-                return oldPackage
-            end
-
-            if shouldRelease then
-                activeMetaData.sessionId = RELEASED_SESSION
-            end
-
-            activeMetaData.version += 1
-            status = "SUCCESS"
-            return pack(activeMetaData, group._buffer:encode(container.data))
-        end)
-    end)
-
-    if not success then
-        status = "DATASTORE_FAILED"
-        warn("[DATASTORE][ERROR]", err)
-    end
-
-    return status
 end
 
-local function createContainer<T>(dataGroup : dataGroup<T>, id : string | number) : container<T>
-    id = tostring(id)
-    assert(id, "You must provide a valid id to create container.")
+
+local function buildLatestKeySet(baseKeys : keySet, changes : changeLog) : keySet
     
-    local containers = dataGroup._containers
-    assert(not containers[id :: string], "A container with similar id already exsists in the data group")
+end
 
-    local container : container<T>
+local function createSchema(id : string, currentKeys : keySet) : schema
 
-    container = {
-        id = id :: string,
-        data = dataGroup.defaultData,
-        name = string,
-        meta = {version = 0, sessionId = HttpService:GenerateGUID(false), size = 0}
-    }
+    local schemaFile = getSchemaFile(id)
 
-    local status : LOAD_STATUS =  fetch(dataGroup, container)
+    local version, baseKeys
 
-    if status == "SUCCESS" and typeof(dataGroup.defaultData) == "table" then
-        local data = container.data :: any
-        local default = dataGroup.defaultData
-        for key, value in default do
-            if data[key] then continue end
-            data[key] = value
-        end
-        for key, _ in data do
-            if default[key] then continue end
-            data[key] = nil
-        end
+    local changes = {}
+
+    local placeVersion = game.PlaceVersion
+
+    if not schemaFile then
+        baseKeys = currentKeys
+        version = placeVersion
     else
-        warn("[DATASTORE][ERROR] failed to create container, STATUS=", status)
-    end
+        local headerSize = HEADER_SIZE + buffer.readu32(schemaFile, 3) -- size of keyset written by buffermodule
+        local headerBuffer = buffer.create(headerSize)
+        buffer.copy(headerBuffer, 0, schemaFile, 0, headerSize)
+        local header = headerBufferObject:decode(headerBuffer)
 
-    containers[id :: string] = container
+        version = header.latestVersion
+        changes = compareKeys(currentKeys, header.baseKeys)
 
-    return table.freeze(container)
-end
+        if #changes > 0 then            
+            if version < placeVersion then
+                currentKeys = buildLatestKeySet(baseKeys, changes)
+            elseif version > placeVersion then
+                schemaFile = appendChanges(changes, schemaFile)
+                setSchemaFile(id, schemaFile)
+            else
+                error("Schema failed, version conflict, In studio press ctrl + s")
+            end
+        end
+    end   
 
-local function deleteContainer<T>(dataGroup : dataGroup<T>, id : string | number)
-    id = tostring(id)
-    assert(id, "You must provide a valid id to create container.")
-    
-    local containers = dataGroup._containers
-    local container = containers[id :: string]
-    if not container then 
-        warn("[DATASTORE][WARN] Attempted to delete non-exsistent container, safely aborted deletion, id=", id) 
-        return 
-    end
-
-    local status : SAVE_STATUS = save(dataGroup, container, true)
-
-    if status ~= "SUCCESS" then
-        warn("[DATASTORE][ERROR] failed to delete container, STATUS=", status)
-        return
-    end
-
-    containers[id :: string] = nil
-end
-
-local function createDataGroup<T>(name : string, defaultData : T, sample : T) : dataGroup<T>
-    local dataGroup : dataGroup<T>
-    dataGroup = {
-        _sample = sample,
-        _buffer = BufferModule.buff(sample),
-        _dataStore = DataStoreService:GetDataStore(name),
-        name = name,
-        _containers = {},
-        defaultData = defaultData,
-        container = createContainer,
-        dump = deleteContainer,
+    local schema : schema = {
+        baseKeys = baseKeys,
+        currentKeys = currentKeys,
+        changeLog = changes,
+        version = version,
     }
-    print(dataGroup._buffer)
-    return table.freeze(dataGroup)
+
+    return schema
+end
+
+local function createData<T>(id : string, sample : T)
+    
+    local bufferObj = BufferModule.buff(sample)
+    
+    local data : data<T> = {
+        sample = sample,
+        bufferObj = bufferObj,
+        schema = createSchema(id, bufferObj._sortedKeys)
+    }
+
+    return table.freeze(data)
 end
 
 return table.freeze({
-    group = createDataGroup,
+    data = createData,
 })
+
+
